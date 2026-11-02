@@ -3,7 +3,7 @@ import { StateGraph, Annotation, START, END } from "@langchain/langgraph";
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 120;
 
 type Turn = { question: string; answer: string };
 const State = Annotation.Root({
