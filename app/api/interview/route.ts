@@ -262,14 +262,79 @@ Keep the tone professional and constructive. Do not claim to know the actual hir
   return (await graph.invoke({ input, output: null })).output;
 }
 
+async function transcribeVoice(request: Request) {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) return NextResponse.json({ error: "GROQ_API_KEY is not configured." }, { status: 503 });
+
+  const form = await request.formData();
+  const audio = form.get("audio");
+  if (!(audio instanceof File) || audio.size === 0) {
+    return NextResponse.json({ error: "No microphone audio was received. Please try recording again." }, { status: 400 });
+  }
+  if (audio.size > 25 * 1024 * 1024) {
+    return NextResponse.json({ error: "That recording is too large. Please keep answers under a few minutes." }, { status: 413 });
+  }
+
+  const groqForm = new FormData();
+  groqForm.append("file", audio, audio.name || "interview-answer.webm");
+  groqForm.append("model", "whisper-large-v3-turbo");
+  groqForm.append("response_format", "json");
+  groqForm.append("language", "en");
+  groqForm.append("temperature", "0");
+  const response = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}` },
+    body: groqForm,
+  });
+  const result = await response.json();
+  if (!response.ok) {
+    return NextResponse.json({ error: result?.error?.message || "Speech transcription failed." }, { status: response.status });
+  }
+  return NextResponse.json({ text: String(result.text || "").trim() });
+}
+
+async function speakWithGroq(text: string) {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) return NextResponse.json({ error: "GROQ_API_KEY is not configured." }, { status: 503 });
+  const input = String(text || "").trim();
+  if (!input || input.length > 200) {
+    return NextResponse.json({ error: "Speech text must be between 1 and 200 characters." }, { status: 400 });
+  }
+
+  const response = await fetch("https://api.groq.com/openai/v1/audio/speech", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "canopylabs/orpheus-v1-english",
+      voice: "hannah",
+      input,
+      response_format: "wav",
+    }),
+  });
+  if (!response.ok) {
+    const errorText = await response.text();
+    let message = "Speech generation failed.";
+    try { message = JSON.parse(errorText)?.error?.message || message; } catch { /* use generic message */ }
+    return NextResponse.json({ error: message }, { status: response.status });
+  }
+  return new NextResponse(await response.arrayBuffer(), {
+    headers: { "Content-Type": "audio/wav", "Cache-Control": "no-store" },
+  });
+}
+
 export async function POST(request: Request) {
   try {
+    if (request.headers.get("content-type")?.includes("multipart/form-data")) {
+      return await transcribeVoice(request);
+    }
     const body = await request.json();
+    if (body.action === "speak") return await speakWithGroq(body.text);
     const result = await runWorkflow(body);
     return NextResponse.json(result);
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Unexpected server error.";
+    console.error("Interview API request failed:", message);
     const status = message.includes("GROQ_API_KEY") ? 503 : 400;
     return NextResponse.json({ error: message }, { status });
   }
